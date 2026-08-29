@@ -102,9 +102,12 @@ class DevinClient:
             if not body.get("has_next_page") or not cursor:
                 break
 
+        # Require a definite tag match. A session whose `tags` are absent or not
+        # a list is NOT trusted as this job's session — reconciliation would
+        # rather find nothing (and retry / escalate) than attach the wrong one.
         def _has_tag(s: dict[str, Any]) -> bool:
-            tags = s.get("tags") or []
-            return not isinstance(tags, list) or tag in tags  # keep if tags absent/unknown
+            tags = s.get("tags")
+            return isinstance(tags, list) and tag in tags
 
         return [s for s in out if _has_tag(s)]
 
@@ -126,7 +129,8 @@ def build_create_payload(cfg: Config, job: dict[str, Any], issue_body: str) -> d
         f"Issue body:\n{issue_body}\n\n"
         "Work only on this issue. Inspect the existing code and tests before editing. "
         "Implement the smallest correct fix, add or update focused tests, run the issue's "
-        "stated test command, then open a pull request against the fork's default branch. "
+        "stated test command, then open a pull request that targets the fork's default "
+        f"branch and whose description contains a closing reference `Fixes #{n}`. "
         "In your final structured output report the PR URL, outcome, a concise summary, the "
         "tests you ran, and any blocker. Do not broaden the change or modify unrelated "
         "dependencies."

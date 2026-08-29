@@ -54,11 +54,21 @@ class GitHubClient:
             return None
         resp.raise_for_status()
         data = resp.json()
-        base_repo = (((data.get("base") or {}).get("repo") or {}).get("full_name")) or ""
+        base = data.get("base") or {}
+        base_repo = ((base.get("repo") or {}).get("full_name")) or ""
         return {
             "state": data.get("state"),
             "merged": bool(data.get("merged")),
             "url_repo": m["repo"],
             "base_repo": base_repo,
+            "base_ref": base.get("ref") or "",
             "body": data.get("body") or "",
         }
+
+    async def default_branch(self, repo: str) -> Optional[str]:
+        resp = await self._client.get(
+            f"https://api.github.com/repos/{repo}", headers=self._headers
+        )
+        if resp.status_code >= 400:
+            return None
+        return resp.json().get("default_branch")

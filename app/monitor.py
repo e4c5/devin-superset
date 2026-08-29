@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Optional
 
 from . import db, states
@@ -66,8 +67,19 @@ async def _verify_pr_open(cfg: Config, gh: GitHubClient, pr_url: Optional[str],
         log.warning("PR %s targets %s / %s, not %s — rejecting",
                     pr_url, status["url_repo"], status["base_repo"], cfg.target_repository)
         return False
-    if str(issue_number) not in (status.get("body") or ""):
-        log.warning("PR %s body does not reference issue #%s", pr_url, issue_number)
+
+    # Must close/reference the triggering issue (e.g. "Fixes #123").
+    if not re.search(rf"#{issue_number}\b", status.get("body") or ""):
+        log.warning("PR %s body does not reference issue #%s — rejecting", pr_url, issue_number)
+        return False
+
+    # Must target the fork's default branch, not some side branch.
+    default = await gh.default_branch(cfg.target_repository)
+    if default and status.get("base_ref") and status["base_ref"] != default:
+        log.warning("PR %s targets branch %r, not default %r — rejecting",
+                    pr_url, status["base_ref"], default)
+        return False
+
     return status["state"] == "open" or status["merged"]
 
 

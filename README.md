@@ -42,7 +42,7 @@ is the governor that makes it safe to run unattended.
 ```bash
 pip install -r requirements.txt
 python scripts/selftest.py     # 21 checks: webhook auth, dedup, malformed payloads, one-active-job, state machine, endpoints
-python scripts/e2e_test.py     # worker + monitor against mocked Devin/GitHub HTTP, 7 scenarios
+python scripts/e2e_test.py     # worker + monitor against mocked Devin/GitHub HTTP, 9 scenarios
 ```
 
 This exercises webhook verification → job reservation → session create → monitor
@@ -68,7 +68,7 @@ GitHub fork  ──issues.labeled / issues.opened──▶  POST /webhook/github
                                               monitor (in-process)
                                                     │  GET /v3/organizations/{org}/sessions/{id}  (backoff 15→60s, honor 429)
                                                     │  `exit` means ended, NOT succeeded
-                                                    │  remediated ⟺ exit + structured_output.outcome==remediated + PR URL + GitHub says PR open/merged
+                                                    │  remediated ⟺ exit + outcome==remediated + PR in target repo, default branch, closes #issue, open/merged
                                                     ▼
                                     issue comments  +  GET /health /metrics /runs /runs/{issue}
 ```
@@ -94,9 +94,10 @@ tag (paginated, client-side tag-filtered) and either attaches the real session o
 It never submits a duplicate.
 
 **PR verification.** `remediated` requires the structured outcome to be
-`remediated` **and** a PR whose URL repo and API base repo both equal
-`TARGET_REPOSITORY` and that GitHub reports open or merged. A PR URL pointing at
-any other repository is rejected to `needs_review`.
+`remediated` **and** a PR that, per the GitHub API: has URL repo and base repo
+both equal to `TARGET_REPOSITORY`; targets the fork's default branch; contains a
+closing reference to the triggering issue (`#<n>`) in its body; and is open or
+merged. Any of these failing routes the run to `needs_review`.
 
 ---
 
