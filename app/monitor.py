@@ -62,10 +62,14 @@ async def _verify_pr_open(cfg: Config, gh: GitHubClient, pr_url: Optional[str],
         return False
     if not status:
         return False
+
+    # Fail closed: every check must be affirmatively satisfied. Missing metadata
+    # (no base repo, no base ref, default-branch lookup failed) is a rejection,
+    # not a pass.
     target = cfg.target_repository.lower()
-    if status["url_repo"].lower() != target or (status["base_repo"] or target).lower() != target:
-        log.warning("PR %s targets %s / %s, not %s — rejecting",
-                    pr_url, status["url_repo"], status["base_repo"], cfg.target_repository)
+    if status["url_repo"].lower() != target or (status.get("base_repo") or "").lower() != target:
+        log.warning("PR %s repo %s / base %s != %s — rejecting",
+                    pr_url, status["url_repo"], status.get("base_repo"), cfg.target_repository)
         return False
 
     # Must close/reference the triggering issue (e.g. "Fixes #123").
@@ -75,9 +79,9 @@ async def _verify_pr_open(cfg: Config, gh: GitHubClient, pr_url: Optional[str],
 
     # Must target the fork's default branch, not some side branch.
     default = await gh.default_branch(cfg.target_repository)
-    if default and status.get("base_ref") and status["base_ref"] != default:
-        log.warning("PR %s targets branch %r, not default %r — rejecting",
-                    pr_url, status["base_ref"], default)
+    if not default or not status.get("base_ref") or status["base_ref"] != default:
+        log.warning("PR %s base ref %r != default %r (or lookup failed) — rejecting",
+                    pr_url, status.get("base_ref"), default)
         return False
 
     return status["state"] == "open" or status["merged"]
