@@ -72,9 +72,15 @@ async def _verify_pr_open(cfg: Config, gh: GitHubClient, pr_url: Optional[str],
                     pr_url, status["url_repo"], status.get("base_repo"), cfg.target_repository)
         return False
 
-    # Must close/reference the triggering issue (e.g. "Fixes #123").
-    if not re.search(rf"#{issue_number}\b", status.get("body") or ""):
-        log.warning("PR %s body does not reference issue #%s — rejecting", pr_url, issue_number)
+    # Must carry a GitHub closing keyword for the triggering issue
+    # ("Fixes #123" / "Closes #123" / "Resolves #123").
+    if not re.search(
+        rf"\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+#{issue_number}\b",
+        status.get("body") or "",
+        re.IGNORECASE,
+    ):
+        log.warning("PR %s body has no closing reference for issue #%s — rejecting",
+                    pr_url, issue_number)
         return False
 
     # Must target the fork's default branch, not some side branch.

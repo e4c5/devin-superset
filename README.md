@@ -32,8 +32,9 @@ The remediation step is an open-ended agentic loop in a codebase the automation
 has never indexed — find the offending call site, understand surrounding tests,
 make the smallest correct change, run the stated test command, iterate on
 failures, open the PR. That is not scriptable with templates or codemods. Devin
-is the primitive that makes an *event → merged PR* pipeline practical; Ops Guard
-is the governor that makes it safe to run unattended.
+is the primitive that makes an *event → reviewable PR* pipeline practical; Ops
+Guard is the governor that makes it safe to run unattended. Guard verifies the
+PR; it never merges — a human still reviews and merges.
 
 ---
 
@@ -95,9 +96,10 @@ It never submits a duplicate.
 
 **PR verification.** `remediated` requires the structured outcome to be
 `remediated` **and** a PR that, per the GitHub API: has URL repo and base repo
-both equal to `TARGET_REPOSITORY`; targets the fork's default branch; contains a
-closing reference to the triggering issue (`#<n>`) in its body; and is open or
-merged. Any of these failing routes the run to `needs_review`.
+both equal to `TARGET_REPOSITORY`; targets the fork's default branch; carries a
+GitHub closing keyword for the triggering issue (`Fixes #<n>` / `Closes #<n>` /
+`Resolves #<n>`) in its body; and is open or merged. Any of these failing routes
+the run to `needs_review`. Guard never merges the PR.
 
 ---
 
@@ -112,14 +114,14 @@ merged. Any of these failing routes the run to `needs_review`.
 - A GitHub token that can comment on issues and read PR state in the fork. This
   token is **not** used for code changes.
 
-Resolve the repository identifier Devin expects:
+`DEVIN_REPOSITORY_ID` is the repo **path** (`owner/repo`, e.g. `e4c5/superset`) as
+connected to the org's Git connection — the same value Devin's `repos` field
+takes. Confirm the fork is connected and spelled the way Devin expects:
 
 ```bash
-curl -s https://api.devin.ai/v3/organizations/$DEVIN_ORG_ID/repositories \
+curl -s https://api.devin.ai/v3beta1/organizations/$DEVIN_ORG_ID/repositories \
   -H "Authorization: Bearer $DEVIN_SERVICE_USER_TOKEN"
 ```
-
-Use the returned identifier as `DEVIN_REPOSITORY_ID`.
 
 ### 2. Configure
 
@@ -132,7 +134,7 @@ cp .env.example .env
 |---|---|
 | `DEVIN_SERVICE_USER_TOKEN` | Devin service-user credential (Bearer) |
 | `DEVIN_ORG_ID` | `org-…` organization id |
-| `DEVIN_REPOSITORY_ID` | identifier from `GET /v3/organizations/{org}/repositories` |
+| `DEVIN_REPOSITORY_ID` | repo path `owner/repo` connected to the org Git connection (usually same as `TARGET_REPOSITORY`) |
 | `DEVIN_API_BASE` | default `https://api.devin.ai` |
 | `GITHUB_WEBHOOK_SECRET` | shared secret; also set on the fork webhook |
 | `GITHUB_TOKEN` | issue comments + PR state reads only |
