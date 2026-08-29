@@ -59,7 +59,9 @@ class Config:
             target_repository=_require("TARGET_REPOSITORY"),
             max_acu_limit=max_acu,
             autofix_label=_optional("DEVIN_AUTOFIX_LABEL", "devin-autofix"),
-            bypass_approval=_optional("BYPASS_APPROVAL", "true").lower() == "true",
+            # Demo-only. Production posture is human approval for sensitive
+            # paths; default off so it must be opted into explicitly.
+            bypass_approval=_optional("BYPASS_APPROVAL", "false").lower() == "true",
             database_path=_optional("DATABASE_PATH", "/app/data/ops_guard.db"),
         )
         return cfg

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from . import db, states
 from .config import Config
@@ -18,6 +19,14 @@ from .logging_utils import event
 log = logging.getLogger("ops_guard.worker")
 
 POLL_INTERVAL = 3.0
+
+# A job stuck in `creating` with no session_id for longer than this lost its
+# worker mid-POST (process crash). Reconcile it by correlation tag.
+STALE_CREATING_GRACE = 90.0
+
+# Devin's session list can lag a just-created session. Keep retrying
+# reconciliation within this window before giving up to `needs_review`.
+RECONCILE_WINDOW = 600.0
 
 
 async def _process(cfg: Config, devin: DevinClient, gh: GitHubClient, job: dict) -> None:
@@ -58,7 +67,15 @@ async def _process(cfg: Config, devin: DevinClient, gh: GitHubClient, job: dict)
     )
 
 
+def _job_age(job: dict) -> float:
+    ref = job.get("started_at") or job.get("created_at") or time.time()
+    return max(0.0, time.time() - ref)
+
+
 async def _reconcile(cfg: Config, devin: DevinClient, job: dict) -> None:
+    """Resolve a job whose session identity is uncertain (crash mid-POST or an
+    uncertain create response) by searching org sessions for its correlation tag.
+    Never submits a duplicate; the tag is already consumed."""
     job_id = job["id"]
     try:
         sessions = await devin.list_sessions_by_tag(job["correlation_tag"])
@@ -78,13 +95,18 @@ async def _reconcile(cfg: Config, devin: DevinClient, job: dict) -> None:
             )
             event(log, "reconciled", job_id=job_id, session_id=sid)
             return
+
     if len(sessions) == 0:
-        # Devin never accepted it: safe to requeue for one more attempt is risky
-        # (tag already consumed). Leave for human review with a clear signal.
+        # Could be "never accepted" or "list not yet consistent". Keep retrying
+        # inside the window; only then hand off to a human.
+        if _job_age(job) < RECONCILE_WINDOW:
+            event(log, "reconcile_pending", job_id=job_id, age=round(_job_age(job)))
+            return
         db.finalize(job_id, state=states.NEEDS_REVIEW,
-                    error="creation_unknown: no session found for correlation tag")
+                    error="creation_unknown: no session found for correlation tag within window")
         event(log, "reconcile_no_session", job_id=job_id)
         return
+
     db.finalize(job_id, state=states.NEEDS_REVIEW,
                 error=f"creation_unknown: {len(sessions)} sessions share the correlation tag")
     event(log, "reconcile_ambiguous", job_id=job_id, count=len(sessions))
@@ -108,7 +130,7 @@ async def run_worker(cfg: Config, stop: asyncio.Event) -> None:
                     await _process(cfg, devin, gh, job)
                     continue
 
-                for unknown in await asyncio.to_thread(_unknown_jobs):
+                for unknown in await asyncio.to_thread(_reconcilable_jobs):
                     await _reconcile(cfg, devin, unknown)
             except Exception:  # noqa: BLE001
                 log.exception("worker loop iteration failed")
@@ -118,8 +140,20 @@ async def run_worker(cfg: Config, stop: asyncio.Event) -> None:
         await gh.aclose()
 
 
-def _unknown_jobs() -> list[dict]:
-    return [j for j in db.jobs_needing_poll() if j["state"] == states.CREATION_UNKNOWN]
+def _reconcilable_jobs() -> list[dict]:
+    """`creation_unknown` jobs, plus `creating` jobs whose worker died mid-POST
+    (no session_id, past the grace period). Both are reconciled by correlation tag."""
+    out = []
+    for j in db.jobs_needing_poll():
+        if j["state"] == states.CREATION_UNKNOWN:
+            out.append(j)
+        elif (
+            j["state"] == states.CREATING
+            and not j.get("session_id")
+            and _job_age(j) > STALE_CREATING_GRACE
+        ):
+            out.append(j)
+    return out
 
 
 async def _sleep_or_stop(stop: asyncio.Event, seconds: float) -> None:

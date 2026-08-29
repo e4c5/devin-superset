@@ -95,6 +95,23 @@ def main() -> int:
     r = post(client, raw, event="push")
     check("non-issues event -> 200 ignored", r.status_code == 200)
 
+    # signed but malformed: missing issue.number must not 500
+    bad = json.dumps({
+        "action": "labeled", "label": {"name": "devin-autofix"},
+        "issue": {"title": "x", "html_url": "u"},  # no number
+        "repository": {"full_name": "acme/superset", "id": 1},
+    }).encode()
+    r = post(client, bad)
+    check("malformed signed payload -> 200 ignored (not 500)",
+          r.status_code == 200 and r.json()["status"] == "ignored")
+
+    bad2 = json.dumps({
+        "action": "labeled", "label": {"name": "devin-autofix"},
+        "issue": None,
+        "repository": {"full_name": "acme/superset", "id": 1},
+    }).encode()
+    check("null issue -> 200 ignored", post(client, bad2).status_code == 200)
+
     d = str(uuid.uuid4())
     r1 = post(client, payload(10), delivery=d)
     r2 = post(client, payload(10), delivery=d)

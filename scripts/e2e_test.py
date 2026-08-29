@@ -56,7 +56,12 @@ def gh_client(pr_state):
         if req.method == "GET" and "/pulls/" in req.url.path:
             if pr_state is None:
                 return httpx.Response(404, json={})
-            return httpx.Response(200, json=pr_state)
+            # /repos/{owner}/{repo}/pulls/{n} -> base repo echoes the URL repo
+            parts = req.url.path.strip("/").split("/")
+            base_repo = f"{parts[1]}/{parts[2]}"
+            body = {"base": {"repo": {"full_name": base_repo}},
+                    "body": pr_state.pop("body", "fixes the issue"), **pr_state}
+            return httpx.Response(200, json=body)
         return httpx.Response(404, json={})
     cfg = get_config()
     return gh_mod.GitHubClient(cfg, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
@@ -131,6 +136,16 @@ async def main() -> int:
         {"status": "suspended", "status_detail": "out_of_credits"},
         None,
         states.FAILED,
+    )
+
+    # PR points at a DIFFERENT repo than TARGET_REPOSITORY -> not remediated.
+    await scenario(
+        "pr-wrong-repo",
+        {"status": "exit", "acus_consumed": 3.0,
+         "structured_output": {"outcome": "remediated", "summary": "ok", "tests_run": ["pytest x"],
+                               "pr_url": "https://github.com/attacker/superset/pull/1", "blocker": None}},
+        {"state": "open", "merged": False},
+        states.NEEDS_REVIEW,
     )
 
     print(f"\n{PASS} passed, {FAIL} failed")

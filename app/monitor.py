@@ -42,13 +42,16 @@ def _extract_pr_url(session: dict[str, Any], structured: Optional[dict]) -> Opti
     if isinstance(prs, dict):
         prs = [prs]
     for pr in prs:
-        url = pr.get("url") or pr.get("html_url")
+        url = pr.get("pr_url") or pr.get("url") or pr.get("html_url")
         if url:
             return url
     return None
 
 
-async def _verify_pr_open(gh: GitHubClient, pr_url: Optional[str]) -> bool:
+async def _verify_pr_open(cfg: Config, gh: GitHubClient, pr_url: Optional[str],
+                          issue_number: int) -> bool:
+    """A PR only counts if it targets TARGET_REPOSITORY and is open or merged.
+    A `remediated` URL pointing at any other repo is rejected."""
     if not pr_url:
         return False
     try:
@@ -58,6 +61,13 @@ async def _verify_pr_open(gh: GitHubClient, pr_url: Optional[str]) -> bool:
         return False
     if not status:
         return False
+    target = cfg.target_repository.lower()
+    if status["url_repo"].lower() != target or (status["base_repo"] or target).lower() != target:
+        log.warning("PR %s targets %s / %s, not %s — rejecting",
+                    pr_url, status["url_repo"], status["base_repo"], cfg.target_repository)
+        return False
+    if str(issue_number) not in (status.get("body") or ""):
+        log.warning("PR %s body does not reference issue #%s", pr_url, issue_number)
     return status["state"] == "open" or status["merged"]
 
 
@@ -105,7 +115,7 @@ async def _evaluate(cfg: Config, gh: GitHubClient, job: dict, session: dict[str,
         return
 
     # status == "exit": the session ended. Ended != succeeded.
-    if outcome == "remediated" and await _verify_pr_open(gh, pr_url):
+    if outcome == "remediated" and await _verify_pr_open(cfg, gh, pr_url, job["issue_number"]):
         tests = ", ".join((structured or {}).get("tests_run") or []) or "n/a"
         await _finish(
             gh, job, states.REMEDIATED, status,

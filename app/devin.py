@@ -73,16 +73,40 @@ class DevinClient:
             self._raise(resp)
         return resp.json()
 
-    async def list_sessions_by_tag(self, tag: str) -> list[dict[str, Any]]:
-        resp = await self._client.get(
-            f"{self._base}/sessions", headers=self._headers, params={"tags": tag}
-        )
-        if resp.status_code >= 400:
-            self._raise(resp)
-        body = resp.json()
-        if isinstance(body, list):
-            return body
-        return body.get("items") or body.get("sessions") or body.get("data") or []
+    async def list_sessions_by_tag(self, tag: str, *, max_pages: int = 10) -> list[dict[str, Any]]:
+        """List org sessions carrying `tag`, following pagination.
+
+        The v3 List Sessions response is paginated as
+        ``{"items": [...], "end_cursor": <str|null>, "has_next_page": <bool>}``.
+        Because the server-side `tags` filter is not contractually guaranteed, we
+        also filter client-side on each session's own `tags`.
+        """
+        out: list[dict[str, Any]] = []
+        cursor: Optional[str] = None
+        for _ in range(max_pages):
+            params: dict[str, Any] = {"tags": tag, "limit": 100}
+            if cursor:
+                params["cursor"] = cursor
+            resp = await self._client.get(
+                f"{self._base}/sessions", headers=self._headers, params=params
+            )
+            if resp.status_code >= 400:
+                self._raise(resp)
+            body = resp.json()
+            if isinstance(body, list):
+                out.extend(body)
+                break
+            page = body.get("items") or body.get("sessions") or body.get("data") or []
+            out.extend(page)
+            cursor = body.get("end_cursor") or body.get("next_cursor")
+            if not body.get("has_next_page") or not cursor:
+                break
+
+        def _has_tag(s: dict[str, Any]) -> bool:
+            tags = s.get("tags") or []
+            return not isinstance(tags, list) or tag in tags  # keep if tags absent/unknown
+
+        return [s for s in out if _has_tag(s)]
 
     async def send_message(self, session_id: str, message: str) -> None:
         resp = await self._client.post(

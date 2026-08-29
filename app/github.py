@@ -39,7 +39,12 @@ class GitHubClient:
         resp.raise_for_status()
 
     async def pr_status(self, pr_url: str) -> Optional[dict[str, Any]]:
-        """Return {'state': 'open'|'closed', 'merged': bool} for a PR html_url, or None."""
+        """Return {state, merged, url_repo, base_repo, body} for a PR URL, or None.
+
+        `url_repo` is the owner/repo parsed from the URL; `base_repo` is the
+        repository the PR actually targets per the API. Callers must confirm both
+        equal TARGET_REPOSITORY before trusting the PR.
+        """
         m = _PR_URL_RE.search(pr_url or "")
         if not m:
             return None
@@ -49,4 +54,11 @@ class GitHubClient:
             return None
         resp.raise_for_status()
         data = resp.json()
-        return {"state": data.get("state"), "merged": bool(data.get("merged"))}
+        base_repo = (((data.get("base") or {}).get("repo") or {}).get("full_name")) or ""
+        return {
+            "state": data.get("state"),
+            "merged": bool(data.get("merged")),
+            "url_repo": m["repo"],
+            "base_repo": base_repo,
+            "body": data.get("body") or "",
+        }

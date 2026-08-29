@@ -41,8 +41,8 @@ is the governor that makes it safe to run unattended.
 
 ```bash
 pip install -r requirements.txt
-python scripts/selftest.py     # 19 checks: webhook auth, dedup, one-active-job, state machine, endpoints
-python scripts/e2e_test.py     # worker + monitor against mocked Devin/GitHub HTTP, 6 scenarios
+python scripts/selftest.py     # 21 checks: webhook auth, dedup, malformed payloads, one-active-job, state machine, endpoints
+python scripts/e2e_test.py     # worker + monitor against mocked Devin/GitHub HTTP, 7 scenarios
 ```
 
 This exercises webhook verification → job reservation → session create → monitor
@@ -86,6 +86,18 @@ A partial unique index enforces **one active job per `(repository, issue)`**.
 `X-GitHub-Delivery` is stored and deduped. Re-labels and webhook retries cannot
 launch a second session.
 
+**Crash safety.** The correlation tag is persisted before the Devin POST. If the
+process dies mid-POST, the job is left in `creating` with no `session_id`; after
+a short grace period the worker reconciles it by listing org sessions for that
+tag (paginated, client-side tag-filtered) and either attaches the real session or
+— only after a bounded eventual-consistency window — routes it to `needs_review`.
+It never submits a duplicate.
+
+**PR verification.** `remediated` requires the structured outcome to be
+`remediated` **and** a PR whose URL repo and API base repo both equal
+`TARGET_REPOSITORY` and that GitHub reports open or merged. A PR URL pointing at
+any other repository is rejected to `needs_review`.
+
 ---
 
 ## Setup
@@ -126,7 +138,7 @@ cp .env.example .env
 | `TARGET_REPOSITORY` | `owner/superset-fork` — the only accepted repo |
 | `MAX_ACU_LIMIT` | per-session ACU cap (default 10) |
 | `DEVIN_AUTOFIX_LABEL` | trigger label (default `devin-autofix`) |
-| `BYPASS_APPROVAL` | `true` so unattended sessions don't stall at approval |
+| `BYPASS_APPROVAL` | **demo-only**, default `false`. `true` skips Devin's action-approval prompts so an unattended run doesn't stall. Production keeps this `false` and gates sensitive paths (migrations, deps, CI config) on human approval. |
 
 ### 3. Run
 
