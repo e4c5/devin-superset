@@ -40,6 +40,7 @@ is the governor that makes it safe to run unattended.
 ## Quick start — simulate the full pipeline (no Devin, no GitHub)
 
 ```bash
+pip install -r requirements.txt
 python scripts/selftest.py     # 19 checks: webhook auth, dedup, one-active-job, state machine, endpoints
 python scripts/e2e_test.py     # worker + monitor against mocked Devin/GitHub HTTP, 6 scenarios
 ```
