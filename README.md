@@ -43,13 +43,14 @@ PR; it never merges — a human still reviews and merges.
 ```bash
 pip install -r requirements.txt
 python scripts/selftest.py     # 21 checks: webhook auth, dedup, malformed payloads, one-active-job, state machine, endpoints
-python scripts/e2e_test.py     # worker + monitor against mocked Devin/GitHub HTTP, 9 scenarios
+python scripts/e2e_test.py     # worker + monitor against mocked Devin/GitHub HTTP, 13 scenarios
 ```
 
 This exercises webhook verification → job reservation → session create → monitor
 verification end to end, including the safety case where a session claims
 `remediated` but GitHub cannot confirm the PR (→ `needs_review`, not
-`remediated`). See [Live setup](#setup) below to run it against the real Devin API.
+`remediated`), and the case where a still-paused session is marked `remediated`
+because its PR is already up. See [Live setup](#setup) below to run it against the real Devin API.
 
 ---
 
@@ -69,7 +70,7 @@ GitHub fork  ──issues.labeled / issues.opened──▶  POST /webhook/github
                                               monitor (in-process)
                                                     │  GET /v3/organizations/{org}/sessions/{id}  (backoff 15→60s, honor 429)
                                                     │  `exit` means ended, NOT succeeded
-                                                    │  remediated ⟺ exit + outcome==remediated + PR in target repo, default branch, closes #issue, open/merged
+                                                    │  remediated ⟺ GitHub shows a PR in target repo, default branch, referencing #issue, open/merged
                                                     ▼
                                     issue comments  +  GET /health /metrics /runs /runs/{issue}
 ```
@@ -94,12 +95,18 @@ tag (paginated, client-side tag-filtered) and either attaches the real session o
 — only after a bounded eventual-consistency window — routes it to `needs_review`.
 It never submits a duplicate.
 
-**PR verification.** `remediated` requires the structured outcome to be
-`remediated` **and** a PR that, per the GitHub API: has URL repo and base repo
-both equal to `TARGET_REPOSITORY`; targets the fork's default branch; carries a
-GitHub closing keyword for the triggering issue (`Fixes #<n>` / `Closes #<n>` /
-`Resolves #<n>`) in its body; and is open or merged. Any of these failing routes
-the run to `needs_review`. Guard never merges the PR.
+**PR verification.** The success signal is a pull request Devin opened for the
+issue. `remediated` requires a PR that, per the GitHub API: has URL repo and base
+repo both equal to `TARGET_REPOSITORY`; targets the fork's default branch;
+references the triggering issue in its body (a closing keyword like `Fixes #<n>`,
+or a bare `#<n>` — Devin fills the repo's PR template, which links the issue
+without a closing keyword; a cross-repository `other/repo#<n>` does not count);
+is attributable to this run — either the Devin API lists it on the session, or
+its body links back to the session, so a session cannot claim credit for an
+unrelated pre-existing PR; and is open or merged. This is checked on every poll,
+so a session still `running` or paused `waiting_for_user` is marked `remediated`
+as soon as its PR is up. A session that ends without such a PR routes to
+`needs_review` (or `failed` on error / billing). Guard never merges the PR.
 
 ---
 
@@ -172,7 +179,7 @@ seconds; watch progress at `GET /runs/{issue_number}` or `python scripts/dashboa
 | Endpoint | Content |
 |---|---|
 | `GET /health` | process + DB reachable |
-| `GET /metrics` | `active_runs`, `remediated_total`, `needs_review_total`, `failed_total`, `prs_opened_total`, `median_elapsed_seconds`, `acus_per_remediated_run` |
+| `GET /metrics` | `active_runs`, `remediated_total`, `needs_review_total`, `failed_total`, `reconciled_total`, `prs_opened_total`, `median_elapsed_seconds`, `acus_per_remediated_run`, `total_jobs` (all computed locally from job records; elapsed and ACU figures are measured at PR-creation, the completion point) |
 | `GET /runs` | every job, summarized |
 | `GET /runs/{issue_number}` | full audit record: delivery, timestamps, state, session id/URL, Devin status, ACUs, structured output, verified PR URL, event log |
 

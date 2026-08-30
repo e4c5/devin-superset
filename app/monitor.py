@@ -1,9 +1,10 @@
 """Session monitor: polls each non-terminal session and verifies completion.
 
-`status: exit` means the session ended, NOT that a fix was delivered. A run is
-`remediated` only when the session exited, the structured output says
-`remediated`, a PR URL is present, and GitHub independently confirms that PR is
-open or merged.
+`status: exit` means the session ended, NOT that a fix was delivered. The
+delivered signal is a pull request: a run is `remediated` once GitHub confirms
+a PR that Devin opened for the issue — targets the fork's default branch,
+references the issue, and is open or merged — regardless of session status.
+A session that exits without such a PR is `needs_review` / `failed`.
 """
 from __future__ import annotations
 
@@ -36,25 +37,62 @@ _BILLING_DETAILS = {
 }
 
 
-def _extract_pr_url(session: dict[str, Any], structured: Optional[dict]) -> Optional[str]:
-    if structured and structured.get("pr_url"):
-        return structured["pr_url"]
+def _extract_pr_url(session: dict[str, Any],
+                    structured: Optional[dict]) -> tuple[Optional[str], bool]:
+    """Return (pr_url, attributed).
+
+    `attributed` is True only when the Devin API itself lists the PR on the
+    session, i.e. Devin opened it. A URL that appears only in the session's
+    self-reported `structured_output` is unattributed: a session could name any
+    pre-existing PR, so the caller must establish the link separately.
+    """
     prs = session.get("pull_requests") or session.get("pull_request") or []
     if isinstance(prs, dict):
         prs = [prs]
     for pr in prs:
         url = pr.get("pr_url") or pr.get("url") or pr.get("html_url")
         if url:
-            return url
-    return None
+            return url, True
+    if structured and structured.get("pr_url"):
+        return structured["pr_url"], False
+    return None, False
+
+
+def _references_issue(body: str, repo: str, issue_number: int) -> bool:
+    """True only for a reference to `repo`'s issue #n.
+
+    A bare `#n` counts, but a cross-repository `other/repo#n` (or an issue URL
+    under another repository) must not: those point at somebody else's issue
+    that merely shares a number.
+    """
+    n = issue_number
+    patterns = (
+        rf"(?<![\w./#-])#{n}\b",
+        rf"(?<![\w./-]){re.escape(repo)}#{n}\b",
+        rf"github\.com/{re.escape(repo)}/issues/{n}\b",
+    )
+    return any(re.search(p, body, re.IGNORECASE) for p in patterns)
+
+
+def _pr_is_devin_delivery(body: str, job: dict) -> bool:
+    """True when the PR body ties the PR back to this job's Devin session.
+
+    Devin appends the session link to the PRs it opens, so the session id in
+    the body is evidence the PR came from this run.
+    """
+    body = body.lower()
+    session_id = (job.get("session_id") or "").strip().lower()
+    session_url = (job.get("session_url") or "").strip().lower()
+    return bool((session_id and session_id in body) or (session_url and session_url in body))
 
 
 async def _verify_pr_open(cfg: Config, gh: GitHubClient, pr_url: Optional[str],
-                          issue_number: int) -> bool:
-    """A PR only counts if it targets TARGET_REPOSITORY and is open or merged.
-    A `remediated` URL pointing at any other repo is rejected."""
+                          job: dict, attributed: bool) -> bool:
+    """A PR only counts if Devin opened it for this job, it targets
+    TARGET_REPOSITORY's default branch, and it is open or merged."""
     if not pr_url:
         return False
+    issue_number = job["issue_number"]
     try:
         status = await gh.pr_status(pr_url)
     except Exception as exc:  # noqa: BLE001
@@ -72,15 +110,21 @@ async def _verify_pr_open(cfg: Config, gh: GitHubClient, pr_url: Optional[str],
                     pr_url, status["url_repo"], status.get("base_repo"), cfg.target_repository)
         return False
 
-    # Must carry a GitHub closing keyword for the triggering issue
-    # ("Fixes #123" / "Closes #123" / "Resolves #123").
-    if not re.search(
-        rf"\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+#{issue_number}\b",
-        status.get("body") or "",
-        re.IGNORECASE,
-    ):
-        log.warning("PR %s body has no closing reference for issue #%s — rejecting",
+    # Must reference the triggering issue. A GitHub closing keyword
+    # ("Fixes #123") is ideal, but Devin follows the repo's PR template, which
+    # links the issue without a closing keyword ("Has associated issue: #123"),
+    # so a bare "#123" mention in the body is accepted too.
+    body = status.get("body") or ""
+    if not _references_issue(body, cfg.target_repository, issue_number):
+        log.warning("PR %s body does not reference issue #%s — rejecting",
                     pr_url, issue_number)
+        return False
+
+    # A PR the Devin API does not list on the session is only self-reported;
+    # accept it solely when its body links back to this job's session.
+    if not attributed and not _pr_is_devin_delivery(body, job):
+        log.warning("PR %s is not attributable to session %s — rejecting",
+                    pr_url, job.get("session_id"))
         return False
 
     # Must target the fork's default branch, not some side branch.
@@ -101,7 +145,8 @@ async def _evaluate(cfg: Config, gh: GitHubClient, job: dict, session: dict[str,
     structured = session.get("structured_output")
     if isinstance(structured, str):
         structured = None
-    pr_url = _extract_pr_url(session, structured if isinstance(structured, dict) else None)
+    pr_url, pr_attributed = _extract_pr_url(
+        session, structured if isinstance(structured, dict) else None)
 
     db.record_poll(
         job_id,
@@ -113,6 +158,20 @@ async def _evaluate(cfg: Config, gh: GitHubClient, job: dict, session: dict[str,
     )
 
     outcome = structured.get("outcome") if isinstance(structured, dict) else None
+
+    # The success bar is "Devin opened a PR for this issue." As soon as GitHub
+    # shows a PR that targets the fork's default branch and references the
+    # issue, the job is `remediated` — even if the session is still running or
+    # paused waiting for a human.
+    if await _verify_pr_open(cfg, gh, pr_url, job, pr_attributed):
+        tests = ", ".join((structured or {}).get("tests_run") or []) or "n/a"
+        await _finish(
+            gh, job, states.REMEDIATED, status or "running",
+            f"Remediated. PR: {pr_url}\nTests run: {tests}\n"
+            f"ACUs: {acus if acus is not None else 'n/a'}",
+            pr_url=pr_url,
+        )
+        return
 
     # Errors / billing / usage limits -> failed.
     if status == "error" or detail == "error":
@@ -136,16 +195,8 @@ async def _evaluate(cfg: Config, gh: GitHubClient, job: dict, session: dict[str,
     if status in _STATUS_WORKING or status == "":
         return
 
-    # status == "exit": the session ended. Ended != succeeded.
-    if outcome == "remediated" and await _verify_pr_open(cfg, gh, pr_url, job["issue_number"]):
-        tests = ", ".join((structured or {}).get("tests_run") or []) or "n/a"
-        await _finish(
-            gh, job, states.REMEDIATED, status,
-            f"Remediated. PR: {pr_url}\nTests run: {tests}\n"
-            f"ACUs: {acus if acus is not None else 'n/a'}",
-            pr_url=pr_url,
-        )
-        return
+    # status == "exit" and no verifiable PR: the session ended without
+    # delivering. Ended != succeeded.
     if outcome in ("blocked", "not_reproducible"):
         blocker = (structured or {}).get("blocker") or outcome
         await _finish(gh, job, states.NEEDS_REVIEW, status,
@@ -153,7 +204,7 @@ async def _evaluate(cfg: Config, gh: GitHubClient, job: dict, session: dict[str,
         return
     await _finish(
         gh, job, states.NEEDS_REVIEW, status,
-        f"Session ended ({detail or 'no detail'}) without a verified PR and `remediated` outcome.\n"
+        f"Session ended ({detail or 'no detail'}) without a PR that GitHub can verify.\n"
         f"Session: {job.get('session_url')}",
     )
 

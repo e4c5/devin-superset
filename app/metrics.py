@@ -31,7 +31,7 @@ def compute() -> dict[str, Any]:
         "remediated_total": len(remediated),
         "needs_review_total": count(states.NEEDS_REVIEW),
         "failed_total": count(states.FAILED),
-        "reconciled_total": count(states.RECONCILED),
+        "reconciled_total": db.reconciled_count(),
         "prs_opened_total": prs_opened,
         "median_elapsed_seconds": round(median(elapsed), 1) if elapsed else None,
         "acus_per_remediated_run": round(sum(acu_values) / len(acu_values), 2) if acu_values else None,
