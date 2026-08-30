@@ -69,7 +69,7 @@ def gh_client(pr_state, issue_no=1, base_ref="main"):
     return gh_mod.GitHubClient(cfg, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
 
-async def scenario(name, session_final, pr_state, expected_state, base_ref="main"):
+async def scenario(name, session_final, pr_state, expected_state, base_ref="main", body=None):
     issue_no = hash(name) % 1000
     db.reserve_job(delivery_id=f"d-{name}", repository_id="acme/superset", event="issues",
                    action="labeled", issue_number=issue_no, issue_url="https://github.com/acme/superset/issues/1",
@@ -77,6 +77,9 @@ async def scenario(name, session_final, pr_state, expected_state, base_ref="main
     job = db.claim_queued_job()
     cfg = get_config()
     sid = f"sess-{name}"
+    if pr_state is not None and body is not None:
+        pr_state = dict(pr_state, body=body.format(
+            issue=issue_no, sid=sid, session_url=f"https://app.devin.ai/sessions/{sid}"))
     dc = devin_client({"status": "running"}, sid=sid)
     gc = gh_client(pr_state, issue_no=issue_no, base_ref=base_ref)
     await _process(cfg, dc, gc, job)
@@ -176,10 +179,47 @@ async def main() -> int:
         "pr-wrong-branch",
         {"status": "exit", "acus_consumed": 3.0,
          "structured_output": {"outcome": "remediated", "summary": "ok", "tests_run": ["pytest x"],
-                               "pr_url": "https://github.com/acme/superset/pull/10", "blocker": None}},
+                               "pr_url": "https://github.com/acme/superset/pull/10", "blocker": None},
+         "pull_requests": [{"url": "https://github.com/acme/superset/pull/10"}]},
         {"state": "open", "merged": False},
         states.NEEDS_REVIEW,
         base_ref="feature/side",
+    )
+
+    # PR body references another repository's issue that happens to share the
+    # number -> not this issue, not remediated.
+    await scenario(
+        "pr-cross-repo-ref",
+        {"status": "exit", "acus_consumed": 3.0,
+         "structured_output": {"outcome": "remediated", "summary": "ok", "tests_run": [],
+                               "pr_url": "https://github.com/acme/superset/pull/12", "blocker": None},
+         "pull_requests": [{"url": "https://github.com/acme/superset/pull/12"}]},
+        {"state": "open", "merged": False},
+        states.NEEDS_REVIEW,
+        body="Fixes other/superset#{issue}",
+    )
+
+    # Session self-reports a PR the Devin API does not list and whose body has
+    # no link back to the session -> unattributed, not remediated.
+    await scenario(
+        "pr-unattributed",
+        {"status": "exit", "acus_consumed": 3.0,
+         "structured_output": {"outcome": "remediated", "summary": "ok", "tests_run": [],
+                               "pr_url": "https://github.com/acme/superset/pull/13", "blocker": None}},
+        {"state": "open", "merged": False},
+        states.NEEDS_REVIEW,
+        body="Fixes #{issue} (opened by somebody else)",
+    )
+
+    # Same, but the PR body carries this job's session link -> remediated.
+    await scenario(
+        "pr-session-linked",
+        {"status": "exit", "acus_consumed": 3.0,
+         "structured_output": {"outcome": "remediated", "summary": "ok", "tests_run": ["pytest x"],
+                               "pr_url": "https://github.com/acme/superset/pull/14", "blocker": None}},
+        {"state": "open", "merged": False},
+        states.REMEDIATED,
+        body="Fixes #{issue}\n\nLink to Devin run: {session_url}",
     )
 
     print(f"\n{PASS} passed, {FAIL} failed")

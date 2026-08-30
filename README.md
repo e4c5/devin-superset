@@ -43,7 +43,7 @@ PR; it never merges — a human still reviews and merges.
 ```bash
 pip install -r requirements.txt
 python scripts/selftest.py     # 21 checks: webhook auth, dedup, malformed payloads, one-active-job, state machine, endpoints
-python scripts/e2e_test.py     # worker + monitor against mocked Devin/GitHub HTTP, 10 scenarios
+python scripts/e2e_test.py     # worker + monitor against mocked Devin/GitHub HTTP, 13 scenarios
 ```
 
 This exercises webhook verification → job reservation → session create → monitor
@@ -100,7 +100,10 @@ issue. `remediated` requires a PR that, per the GitHub API: has URL repo and bas
 repo both equal to `TARGET_REPOSITORY`; targets the fork's default branch;
 references the triggering issue in its body (a closing keyword like `Fixes #<n>`,
 or a bare `#<n>` — Devin fills the repo's PR template, which links the issue
-without a closing keyword); and is open or merged. This is checked on every poll,
+without a closing keyword; a cross-repository `other/repo#<n>` does not count);
+is attributable to this run — either the Devin API lists it on the session, or
+its body links back to the session, so a session cannot claim credit for an
+unrelated pre-existing PR; and is open or merged. This is checked on every poll,
 so a session still `running` or paused `waiting_for_user` is marked `remediated`
 as soon as its PR is up. A session that ends without such a PR routes to
 `needs_review` (or `failed` on error / billing). Guard never merges the PR.
