@@ -19,7 +19,7 @@ Devin is the execution primitive. The FastAPI service governs when Devin may run
 1. A labeled issue triggers exactly one Devin session.
 2. Devin opens a PR against the Superset fork that references the issue.
 3. Devin returns a structured report naming its outcome and tests.
-4. The service marks the run `remediated` only when the session exits successfully, a PR URL exists, and the structured report says `remediated`.
+4. The service marks the run `remediated` as soon as GitHub confirms a PR that Devin opened for the issue (target repo, default branch, references the issue, open or merged) — the task is done when the PR exists, not when it merges.
 5. A technical viewer can inspect the delivery, session, report, PR, duration, and ACUs via the API/dashboard.
 
 ---
@@ -166,14 +166,17 @@ The session model has a coarse `status` and a finer `status_detail`:
 
 `status: exit` means the session has ended; it does not by itself mean a fix was delivered. A paused session keeps `status: running` with `status_detail: waiting_for_user`.
 
+The success signal is a pull request Devin opened for the issue, checked on every
+poll regardless of session `status`.
+
 | Condition | Guard state |
 |---|---|
-| `status == exit` + output outcome `remediated` + PR URL exists and GitHub confirms it open/merged | `remediated` |
+| GitHub confirms a PR for the issue: URL/base repo == `TARGET_REPOSITORY`, targets the default branch, body references `#<issue>`, open or merged | `remediated` |
+| `status == error` or `status_detail == error` (and no such PR) | `failed` |
+| `status == suspended` or `status_detail` is a billing/usage-limit reason (and no such PR) | `failed` |
+| `status_detail` in {`waiting_for_user`, `waiting_for_approval`} (and no such PR) | `needs_review` |
 | `status == exit` + output `blocked` or `not_reproducible` | `needs_review` |
-| `status == exit` without a verified PR + `remediated` outcome | `needs_review` |
-| `status == error` or `status_detail == error` | `failed` |
-| `status == suspended` or `status_detail` is a billing/usage-limit reason | `failed` |
-| `status_detail` in {`waiting_for_user`, `waiting_for_approval`} | `needs_review` |
+| `status == exit` without a verified PR | `needs_review` |
 
 On `waiting_for_user`, a maintainer can intervene in Devin or Guard can send a narrowly scoped clarification through:
 
@@ -206,11 +209,19 @@ GET /runs/{issue_number}
   "remediated_total": 4,
   "needs_review_total": 1,
   "failed_total": 1,
+  "reconciled_total": 0,
   "prs_opened_total": 4,
   "median_elapsed_seconds": 842,
-  "acus_per_remediated_run": 6.75
+  "acus_per_remediated_run": 6.75,
+  "total_jobs": 6
 }
 ```
+
+All values are computed locally from job records. Because a run is finalized
+`remediated` the moment its PR is verified (not when the session exits),
+`median_elapsed_seconds` is time-to-PR and `acus_per_remediated_run` is the ACU
+count observed at that point — a lower bound on total session cost if Devin
+keeps working after opening the PR.
 
 `/runs/{issue_number}` is the audit record: GitHub delivery IDs, timestamps, job state, session URL and ID, current Devin status, ACU consumption, structured output, error details, and verified PR URL. The CLI dashboard is optional; the REST endpoints are the authoritative demo output.
 

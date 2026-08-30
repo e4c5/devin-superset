@@ -2,7 +2,9 @@
 
 Companion to `Devin_Ops_Guard_FastAPI_Architecture_v2.md`. Ordered for a 2–3 hour build. Ship a working end-to-end demo before polishing anything.
 
-**Status: code complete and verified live end-to-end (webhook → real Devin session → monitor → issue comments → /metrics) against org `org-d2a9a68f5bab400597bcc8c7e6e387a1`, repo `e4c5/superset`, tunnelled via localtunnel. Remaining: author real issues, do a clean remediation run, record the Loom.**
+**Status: code complete and verified live end-to-end (webhook → real Devin session → monitor → issue comments → /metrics) against org `org-d2a9a68f5bab400597bcc8c7e6e387a1`, repo `e4c5/superset`, tunnelled via localtunnel. Solution repo pushed public: https://github.com/e4c5/devin-superset. Remaining: author real issues, run each through to a Devin PR, record the Loom.**
+
+**Success definition (2026-08-30): a run is `remediated` as soon as GitHub shows a PR Devin opened for the issue (target repo, default branch, body references `#<issue>`, open or merged) — checked on every poll, so a still-running or `waiting_for_user` session counts once its PR is up. Merge is not required.**
 
 Confirmed API facts (code matches):
 - Create response: `session_id` (not `id`), `url`, `status` starts at `new`.
@@ -33,7 +35,7 @@ Legend: `[x]` done · `[~]` partially done / needs live credentials · `[ ]` not
 - [ ] Author 3–4 issues covering the required categories: dependency/CVE upgrade, code-quality/lint finding, small reproducible bug, missing test coverage.
 - [ ] Each issue body includes: expected behavior, acceptance criteria, exact focused test command.
 - [ ] Do **not** add the `devin-autofix` label yet (labeling is the live demo trigger).
-- [ ] Create the `devin-autofix` label in the repo.
+- [x] Create the `devin-autofix` label in the repo. (`e4c5/superset`, color `5319e7`.)
 
 ## Phase 2 — Project Skeleton ✅
 
@@ -75,33 +77,36 @@ Legend: `[x]` done · `[~]` partially done / needs live credentials · `[ ]` not
 
 - [x] Background loop: for each `running` job with a `session_id`, `GET /v3/organizations/{org}/sessions/{id}`.
 - [x] Backoff 15s → 60s (×1.5 when idle, reset when work done); honor `429` `Retry-After`; `db.record_poll` persists every observed `status`/`status_detail`/`acus_consumed`/`pr_url`/`structured_output`.
-- [x] Completion mapping (`app/monitor.py::_evaluate`):
-  - [x] `exit` + `structured_output.outcome == remediated` + PR URL present + **GitHub confirms PR open or merged** → `remediated`.
+- [x] Completion mapping (`app/monitor.py::_evaluate`), checked every poll in this order:
+  - [x] **GitHub confirms a PR for the issue** (URL/base repo == target, default branch, body references `#<issue>`, open/merged) → `remediated` — regardless of session `status` (covers a still-running or `waiting_for_user` session whose PR is already up).
+  - [x] `error` / `error` detail (and no such PR) → `failed`.
+  - [x] `suspended` / billing-or-usage-limit detail (and no such PR) → `failed`.
+  - [x] `waiting_for_user` / `waiting_for_approval` (and no such PR) → `needs_review`.
+  - [x] still working (`new`/`claimed`/`running`/`resuming`) and no PR → keep polling.
   - [x] `exit` + `blocked`/`not_reproducible` → `needs_review` (with blocker text).
-  - [x] `error` / `failed` status (incl. ACU-limit / suspended detail) → `failed`.
-  - [x] `waiting_for_user` / `waiting_for_approval` / `blocked` / `suspended` → `needs_review`.
-  - [x] `exit` without verifiable PR + `remediated` outcome → `needs_review`.
-  - [x] Unrecognized terminal status → `needs_review` (conservative).
+  - [x] `exit` without a verifiable PR → `needs_review` (conservative).
 - [x] On terminal state: post issue comment (PR URL + tests + ACUs, or reason + Devin URL); set `completed_at`.
-- [~] `waiting_for_user`: hook present (`_maybe_nudge`) but intentionally a no-op — does not auto-answer. Wire a narrowly-scoped `POST .../sessions/{id}/messages` only if you want it for the demo.
+- [~] `waiting_for_user`: hook present (`_maybe_nudge`) but intentionally a no-op. Now lower stakes — if Devin has already opened the PR the run is `remediated` before the wait matters. Wire `POST .../sessions/{id}/messages` only if a demo issue needs an answer before the PR exists.
 
 ## Phase 7 — Observable Outputs ✅
 
 - [x] `GET /health` — process + DB reachable.
 - [x] `GET /runs` — all jobs, summarized (issue, title, state, status, session_url, pr_url, acus, timestamps).
 - [x] `GET /runs/{issue_number}` — full audit record incl. `job_events` timeline, session id/URL, status, ACUs, structured output, error, verified PR URL.
-- [x] `GET /metrics` — `active_runs`, `remediated_total`, `needs_review_total`, `failed_total`, `reconciled_total`, `prs_opened_total`, `median_elapsed_seconds`, `acus_per_remediated_run`, `total_jobs`. Computed locally from job records.
+- [x] `GET /metrics` — `active_runs`, `remediated_total`, `needs_review_total`, `failed_total`, `reconciled_total` (from `job_events`, `kind='reconciled'`), `prs_opened_total`, `median_elapsed_seconds`, `acus_per_remediated_run`, `total_jobs`. Computed locally from job records. Elapsed + ACU figures are snapshotted at PR-creation (the completion point), so they are a lower bound if Devin keeps working after opening the PR.
 - [x] Structured JSON log line on every state transition + webhook decision (`app/logging_utils.py::event`).
 - [x] `scripts/dashboard.py` — terminal table over `/metrics` + `/runs` (optional; REST is the source of truth). Uses stdlib only, not `rich`.
 
 ## Phase 8 — Local Verification (no tunnel) ✅
 
 - [x] `scripts/emit_sample_webhook.py` — sends a correctly signed `issues.labeled` (or `opened`) fixture; `--delivery` to replay, `--bad-signature` to force 401.
-- [x] `scripts/selftest.py` (19 checks, offline, no Devin/GitHub calls): bad signature → 401; wrong repo → 403; non-trigger action / non-`issues` event → 200 ignored; first delivery → 202; same delivery id → 200 `duplicate_delivery`; second delivery same issue → 200 `already_active`; exactly one job row; correlation tag `ops-guard:issue:10:attempt:1`; claim → `creating`; new delivery after terminal → 202 `attempt:2`; `/health`, `/metrics`, `/runs/{n}`, `/runs/999`→404.
-- [x] `scripts/e2e_test.py` (10 checks): worker create → `running`, then monitor:
-  - happy path (`exit` + remediated + PR GitHub-confirmed) → `remediated`;
+- [x] `scripts/selftest.py` (21 checks, offline, no Devin/GitHub calls): bad signature → 401; wrong repo → 403; non-trigger action / non-`issues` event → 200 ignored; malformed/null payloads → 200 ignored (not 500); first delivery → 202; same delivery id → 200 `duplicate_delivery`; second delivery same issue → 200 `already_active`; exactly one job row; correlation tag `ops-guard:issue:10:attempt:1`; claim → `creating`; new delivery after terminal → 202 `attempt:2`; `/health`, `/metrics`, `/runs/{n}`, `/runs/999`→404.
+- [x] `scripts/e2e_test.py` (10 scenarios / 20 checks): worker create → `running`, then monitor:
+  - happy path (PR GitHub-confirmed) → `remediated`;
+  - `waiting_for_user` **with** a confirmed PR → `remediated`;
   - `exit` claiming remediated but PR **not** confirmable by GitHub → `needs_review`;
-  - `blocked` → `needs_review`; `error` → `failed`; `waiting_for_user` → `needs_review`.
+  - PR wrong repo / wrong branch / no `#issue` reference → `needs_review`;
+  - `blocked` → `needs_review`; `error` / `suspended` (billing) → `failed`; `waiting_for_user` with no PR → `needs_review`.
 - [x] Docker: `docker build` succeeds; container boots, `/health` ok, signed webhook → 202, job persisted, `/runs` + `/runs/{n}` served (verified via `docker exec` — rootless podman here doesn't publish host ports; a normal Docker daemon does).
 
 ## Phase 9 — Live Integration
@@ -110,8 +115,9 @@ Legend: `[x]` done · `[~]` partially done / needs live credentials · `[ ]` not
 - [x] Tunnel: `localtunnel --port 8000` → `https://twenty-lizards-travel.loca.lt` (URL changes on restart).
 - [x] Webhook on `e4c5/superset` (hook `671982928`, events = Issues) → tunnel; ping delivers 200.
 - [x] Pipeline proven on `e4c5/diary#3`: webhook → `job_reserved` → real `session_created` → "session started" comment → monitor → `waiting_for_user` → `needs_review` + terminal comment → `/metrics` updated. (Ended in `waiting_for_user` only because the test issue had nothing to fix.)
-- [x] API shapes verified live; `app/devin.py` (`items` envelope) and `app/monitor.py` (status/status_detail model, `new` state) fixed accordingly. Tests: selftest 19/19, e2e 12/12.
-- [ ] Author real Superset issues, label one → run through to a verified PR → `/runs/{n}` = `remediated`.
+- [x] API shapes verified live; `app/devin.py` (`items` envelope) and `app/monitor.py` (status/status_detail model, `new` state) fixed accordingly. Tests: selftest 21/21, e2e 20/20.
+- [~] First real run done (`e4c5/superset#1` → session `0485fcd…` → PR `e4c5/superset#2` open). Ended `waiting_for_user` → `needs_review` under the *old* rules; under the new "PR created = remediated" rule this run qualifies. Re-trigger (attempt 2) or reconcile the stale job to show `/runs/1` = `remediated`.
+- [ ] Author the remaining real Superset issues, label each → run through to a Devin PR → `/runs/{n}` = `remediated`.
 - [ ] Remediate a second issue so throughput > 1 is real.
 
 ## Phase 10 — Demo Prep
@@ -125,7 +131,7 @@ Legend: `[x]` done · `[~]` partially done / needs live credentials · `[ ]` not
 
 ## Phase 11 — Deliverables
 
-- [~] Public solution repo (Docker, README) — code is ready; push it to a public repo (`git init` — this dir is not yet a repo).
+- [x] Public solution repo (Docker, README) — https://github.com/e4c5/devin-superset (public), `origin/main` == local `HEAD`.
 - [ ] Public Superset fork with the issues and the merged/open PRs linked.
 - [ ] Loom link (not an .mp4).
 
@@ -144,7 +150,7 @@ Legend: `[x]` done · `[~]` partially done / needs live credentials · `[ ]` not
 - [x] Delivery dedup + one-active-job-per-issue.
 - [x] `creating`/`correlation_tag`-before-POST + `creation_unknown` reconciliation.
 - [x] `max_acu_limit` on every session.
-- [x] Monitor treating `exit` as "ended," not "succeeded" (PR verified against GitHub before `remediated`).
+- [x] Monitor treating `exit` as "ended," not "succeeded" — a PR is verified against GitHub (repo, default branch, `#issue` reference, open/merged) before `remediated`, and that check is the sole success gate.
 
 ---
 

@@ -1,9 +1,10 @@
 """Session monitor: polls each non-terminal session and verifies completion.
 
-`status: exit` means the session ended, NOT that a fix was delivered. A run is
-`remediated` only when the session exited, the structured output says
-`remediated`, a PR URL is present, and GitHub independently confirms that PR is
-open or merged.
+`status: exit` means the session ended, NOT that a fix was delivered. The
+delivered signal is a pull request: a run is `remediated` once GitHub confirms
+a PR that Devin opened for the issue — targets the fork's default branch,
+references the issue, and is open or merged — regardless of session status.
+A session that exits without such a PR is `needs_review` / `failed`.
 """
 from __future__ import annotations
 
@@ -72,14 +73,12 @@ async def _verify_pr_open(cfg: Config, gh: GitHubClient, pr_url: Optional[str],
                     pr_url, status["url_repo"], status.get("base_repo"), cfg.target_repository)
         return False
 
-    # Must carry a GitHub closing keyword for the triggering issue
-    # ("Fixes #123" / "Closes #123" / "Resolves #123").
-    if not re.search(
-        rf"\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+#{issue_number}\b",
-        status.get("body") or "",
-        re.IGNORECASE,
-    ):
-        log.warning("PR %s body has no closing reference for issue #%s — rejecting",
+    # Must reference the triggering issue. A GitHub closing keyword
+    # ("Fixes #123") is ideal, but Devin follows the repo's PR template, which
+    # links the issue without a closing keyword ("Has associated issue: #123"),
+    # so a bare "#123" mention in the body is accepted too.
+    if not re.search(rf"#{issue_number}\b", status.get("body") or ""):
+        log.warning("PR %s body does not reference issue #%s — rejecting",
                     pr_url, issue_number)
         return False
 
@@ -114,6 +113,20 @@ async def _evaluate(cfg: Config, gh: GitHubClient, job: dict, session: dict[str,
 
     outcome = structured.get("outcome") if isinstance(structured, dict) else None
 
+    # The success bar is "Devin opened a PR for this issue." As soon as GitHub
+    # shows a PR that targets the fork's default branch and references the
+    # issue, the job is `remediated` — even if the session is still running or
+    # paused waiting for a human.
+    if await _verify_pr_open(cfg, gh, pr_url, job["issue_number"]):
+        tests = ", ".join((structured or {}).get("tests_run") or []) or "n/a"
+        await _finish(
+            gh, job, states.REMEDIATED, status or "running",
+            f"Remediated. PR: {pr_url}\nTests run: {tests}\n"
+            f"ACUs: {acus if acus is not None else 'n/a'}",
+            pr_url=pr_url,
+        )
+        return
+
     # Errors / billing / usage limits -> failed.
     if status == "error" or detail == "error":
         await _finish(gh, job, states.FAILED, status,
@@ -136,16 +149,8 @@ async def _evaluate(cfg: Config, gh: GitHubClient, job: dict, session: dict[str,
     if status in _STATUS_WORKING or status == "":
         return
 
-    # status == "exit": the session ended. Ended != succeeded.
-    if outcome == "remediated" and await _verify_pr_open(cfg, gh, pr_url, job["issue_number"]):
-        tests = ", ".join((structured or {}).get("tests_run") or []) or "n/a"
-        await _finish(
-            gh, job, states.REMEDIATED, status,
-            f"Remediated. PR: {pr_url}\nTests run: {tests}\n"
-            f"ACUs: {acus if acus is not None else 'n/a'}",
-            pr_url=pr_url,
-        )
-        return
+    # status == "exit" and no verifiable PR: the session ended without
+    # delivering. Ended != succeeded.
     if outcome in ("blocked", "not_reproducible"):
         blocker = (structured or {}).get("blocker") or outcome
         await _finish(gh, job, states.NEEDS_REVIEW, status,
@@ -153,7 +158,7 @@ async def _evaluate(cfg: Config, gh: GitHubClient, job: dict, session: dict[str,
         return
     await _finish(
         gh, job, states.NEEDS_REVIEW, status,
-        f"Session ended ({detail or 'no detail'}) without a verified PR and `remediated` outcome.\n"
+        f"Session ended ({detail or 'no detail'}) without a PR that GitHub can verify.\n"
         f"Session: {job.get('session_url')}",
     )
 

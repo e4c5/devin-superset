@@ -243,6 +243,15 @@ def claim_queued_job() -> Optional[dict[str, Any]]:
         )
 
 
+def reconciled_count() -> int:
+    """How many jobs were recovered by correlation-tag reconciliation."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT job_id) AS n FROM job_events WHERE kind = 'reconciled'"
+        ).fetchone()
+        return int(row["n"])
+
+
 def jobs_needing_poll() -> list[dict[str, Any]]:
     with _connect() as conn:
         rows = conn.execute(

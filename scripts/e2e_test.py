@@ -134,6 +134,16 @@ async def main() -> int:
         states.NEEDS_REVIEW,
     )
 
+    # Session still paused for a human, but a valid PR is already up -> the PR
+    # is the success bar, so the job is remediated.
+    await scenario(
+        "waiting-with-pr",
+        {"status": "running", "status_detail": "waiting_for_user", "acus_consumed": 2.0,
+         "pull_requests": [{"url": "https://github.com/acme/superset/pull/11"}]},
+        {"state": "open", "merged": False},
+        states.REMEDIATED,
+    )
+
     await scenario(
         "suspended-billing",
         {"status": "suspended", "status_detail": "out_of_credits"},
