@@ -43,7 +43,7 @@ PR; it never merges — a human still reviews and merges.
 ```bash
 pip install -r requirements.txt
 python scripts/selftest.py     # 21 checks: webhook auth, dedup, malformed payloads, one-active-job, state machine, endpoints
-python scripts/e2e_test.py     # worker + monitor against mocked Devin/GitHub HTTP, 14 scenarios
+python scripts/e2e_test.py     # worker + monitor against mocked Devin/GitHub HTTP, 16 scenarios
 ```
 
 This exercises webhook verification → job reservation → session create → monitor

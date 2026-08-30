@@ -81,7 +81,7 @@ Legend: `[x]` done · `[~]` partially done / needs live credentials · `[ ]` not
   - [x] **GitHub confirms a PR for the issue** (URL/base repo == target, default branch, body references `#<issue>`, open/merged) → `remediated` — regardless of session `status` (covers a still-running or `waiting_for_user` session whose PR is already up).
   - [x] `error` / `error` detail (and no such PR) → `failed`.
   - [x] `suspended` / billing-or-usage-limit detail (and no such PR) → `failed`.
-  - [x] `waiting_for_user` / `waiting_for_approval`, no PR, within `WAITING_GRACE` (30 min) → keep polling (stays `running`) + one-time "needs input" comment; past the window → `needs_review`.
+  - [x] `waiting_for_user` / `waiting_for_approval`, no PR, within `WAITING_GRACE` (30 min from when the session first paused) → keep polling (stays `running`) + one-time "needs input" comment (retried until GitHub accepts it); waiting past the window → `needs_review`.
   - [x] still working (`new`/`claimed`/`running`/`resuming`) and no PR → keep polling.
   - [x] `exit` + `blocked`/`not_reproducible` → `needs_review` (with blocker text).
   - [x] `exit` without a verifiable PR → `needs_review` (conservative).

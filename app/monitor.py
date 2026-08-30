@@ -45,10 +45,10 @@ _BILLING_DETAILS = {
     "total_session_limit_exceeded",
 }
 
-
-def _job_age(job: dict) -> float:
-    ref = job.get("started_at") or job.get("created_at") or time.time()
-    return max(0.0, time.time() - ref)
+# `waiting` records when the session first paused on a human — the start of the
+# grace window; `waiting_notice` records that the issue comment was delivered.
+_WAITING_EVENT = "waiting"
+_WAITING_NOTICE_EVENT = "waiting_notice"
 
 
 def _extract_pr_url(session: dict[str, Any],
@@ -202,18 +202,11 @@ async def _evaluate(cfg: Config, gh: GitHubClient, job: dict, session: dict[str,
     # `remediated` on the next pass. Post the "needs input" note once.
     if detail in _WAITING_DETAILS:
         await _maybe_nudge(cfg, job, session, detail)
-        if await asyncio.to_thread(
-            db.add_event_once, job_id, "waiting", detail
-        ):
-            try:
-                await gh.comment_on_issue(
-                    job["issue_number"],
-                    f"**Ops Guard** — Devin is {detail.replace('_', ' ')} and may need "
-                    f"input. Session: {job.get('session_url')}\nStill watching for a PR.",
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning("waiting note failed for #%s: %s", job["issue_number"], exc)
-        if _job_age(job) < WAITING_GRACE:
+        waiting_since = await asyncio.to_thread(
+            db.first_seen_at, job_id, _WAITING_EVENT, detail
+        )
+        await _notify_waiting(gh, job, detail)
+        if time.time() - waiting_since < WAITING_GRACE:
             return
         await _finish(gh, job, states.NEEDS_REVIEW, status,
                       f"Devin has been {detail.replace('_', ' ')} for over "
@@ -249,6 +242,32 @@ async def _finish(gh: GitHubClient, job: dict, state: str, status: str, comment:
         await gh.comment_on_issue(job["issue_number"], f"**Ops Guard — {state}**\n\n{comment}")
     except Exception as exc:  # noqa: BLE001
         log.warning("terminal comment failed for #%s: %s", job["issue_number"], exc)
+
+
+async def _notify_waiting(gh: GitHubClient, job: dict, detail: str) -> None:
+    """Tell the issue once that the session needs input, retrying on failure.
+
+    The delivery marker is persisted only after GitHub accepts the comment, so
+    a transient failure is retried on the next poll. The comment carries a
+    hidden marker so a retry after a crash between the accepted request and the
+    local write finds the existing comment instead of posting a second one.
+    """
+    job_id = job["id"]
+    issue_number = job["issue_number"]
+    if await asyncio.to_thread(db.has_event, job_id, _WAITING_NOTICE_EVENT):
+        return
+    marker = f"<!-- ops-guard:waiting:{job_id} -->"
+    try:
+        if not await gh.issue_has_comment(issue_number, marker):
+            await gh.comment_on_issue(
+                issue_number,
+                f"{marker}\n**Ops Guard** — Devin is {detail.replace('_', ' ')} and may need "
+                f"input. Session: {job.get('session_url')}\nStill watching for a PR.",
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("waiting note failed for #%s: %s", issue_number, exc)
+        return
+    await asyncio.to_thread(db.add_event_once, job_id, _WAITING_NOTICE_EVENT, detail)
 
 
 async def _maybe_nudge(cfg: Config, job: dict, session: dict, status: str) -> None:
