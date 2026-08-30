@@ -243,6 +243,20 @@ def claim_queued_job() -> Optional[dict[str, Any]]:
         )
 
 
+def add_event_once(job_id: int, kind: str, detail: str = "") -> bool:
+    """Insert a job_event of this kind only if the job has none already.
+    Returns True if it was inserted (caller should act once, e.g. comment)."""
+    with _writer() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM job_events WHERE job_id = ? AND kind = ? LIMIT 1",
+            (job_id, kind),
+        ).fetchone()
+        if exists is not None:
+            return False
+        _log_event(conn, job_id, kind, detail)
+        return True
+
+
 def reconciled_count() -> int:
     """How many jobs were recovered by correlation-tag reconciliation."""
     with _connect() as conn:

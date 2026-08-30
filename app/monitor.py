@@ -4,13 +4,16 @@
 delivered signal is a pull request: a run is `remediated` once GitHub confirms
 a PR that Devin opened for the issue — targets the fork's default branch,
 references the issue, and is open or merged — regardless of session status.
-A session that exits without such a PR is `needs_review` / `failed`.
+A session that exits without such a PR is `needs_review` / `failed`. A session
+paused on a human is kept under observation for `WAITING_GRACE` (it may still
+open a PR) before it is routed to `needs_review`.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import re
+import time
 from typing import Any, Optional
 
 from . import db, states
@@ -24,6 +27,12 @@ log = logging.getLogger("ops_guard.monitor")
 MIN_BACKOFF = 15.0
 MAX_BACKOFF = 60.0
 
+# A session paused on a human (`waiting_for_user` / `waiting_for_approval`) with
+# no PR yet is not abandoned immediately: Devin may still open one, and a PR is
+# the completion signal. Keep polling until the session opens a PR, ends, or has
+# been waiting this long — only then route it to `needs_review`.
+WAITING_GRACE = 1800.0
+
 # Devin v3 session model: coarse `status` + finer `status_detail`.
 #   status:        new | claimed | running | exit | error | suspended | resuming
 #   status_detail: working | waiting_for_user | waiting_for_approval | finished
@@ -35,6 +44,11 @@ _BILLING_DETAILS = {
     "payment_declined", "org_usage_limit_exceeded", "user_usage_limit_exceeded",
     "total_session_limit_exceeded",
 }
+
+
+def _job_age(job: dict) -> float:
+    ref = job.get("started_at") or job.get("created_at") or time.time()
+    return max(0.0, time.time() - ref)
 
 
 def _extract_pr_url(session: dict[str, Any], structured: Optional[dict]) -> Optional[str]:
@@ -137,11 +151,27 @@ async def _evaluate(cfg: Config, gh: GitHubClient, job: dict, session: dict[str,
                       f"Devin session suspended ({detail or status}). Session: {job.get('session_url')}")
         return
 
-    # Paused waiting on a human (session `status` stays `running`).
+    # Paused waiting on a human (session `status` stays `running`), no PR yet.
+    # Keep polling within the grace window — a PR would flip this to
+    # `remediated` on the next pass. Post the "needs input" note once.
     if detail in _WAITING_DETAILS:
         await _maybe_nudge(cfg, job, session, detail)
+        if await asyncio.to_thread(
+            db.add_event_once, job_id, "waiting", detail
+        ):
+            try:
+                await gh.comment_on_issue(
+                    job["issue_number"],
+                    f"**Ops Guard** — Devin is {detail.replace('_', ' ')} and may need "
+                    f"input. Session: {job.get('session_url')}\nStill watching for a PR.",
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("waiting note failed for #%s: %s", job["issue_number"], exc)
+        if _job_age(job) < WAITING_GRACE:
+            return
         await _finish(gh, job, states.NEEDS_REVIEW, status,
-                      f"Devin is {detail.replace('_', ' ')} — needs a human. "
+                      f"Devin has been {detail.replace('_', ' ')} for over "
+                      f"{int(WAITING_GRACE // 60)} min without opening a PR — needs a human. "
                       f"Session: {job.get('session_url')}")
         return
 

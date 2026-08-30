@@ -43,7 +43,7 @@ PR; it never merges — a human still reviews and merges.
 ```bash
 pip install -r requirements.txt
 python scripts/selftest.py     # 21 checks: webhook auth, dedup, malformed payloads, one-active-job, state machine, endpoints
-python scripts/e2e_test.py     # worker + monitor against mocked Devin/GitHub HTTP, 10 scenarios
+python scripts/e2e_test.py     # worker + monitor against mocked Devin/GitHub HTTP, 11 scenarios
 ```
 
 This exercises webhook verification → job reservation → session create → monitor
@@ -103,7 +103,9 @@ or a bare `#<n>` — Devin fills the repo's PR template, which links the issue
 without a closing keyword); and is open or merged. This is checked on every poll,
 so a session still `running` or paused `waiting_for_user` is marked `remediated`
 as soon as its PR is up. A session that ends without such a PR routes to
-`needs_review` (or `failed` on error / billing). Guard never merges the PR.
+`needs_review` (or `failed` on error / billing); a session paused on a human is
+kept under observation for 30 min (it may still open a PR) before it goes to
+`needs_review`. Guard never merges the PR.
 
 ---
 

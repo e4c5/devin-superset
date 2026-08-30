@@ -81,7 +81,7 @@ Legend: `[x]` done · `[~]` partially done / needs live credentials · `[ ]` not
   - [x] **GitHub confirms a PR for the issue** (URL/base repo == target, default branch, body references `#<issue>`, open/merged) → `remediated` — regardless of session `status` (covers a still-running or `waiting_for_user` session whose PR is already up).
   - [x] `error` / `error` detail (and no such PR) → `failed`.
   - [x] `suspended` / billing-or-usage-limit detail (and no such PR) → `failed`.
-  - [x] `waiting_for_user` / `waiting_for_approval` (and no such PR) → `needs_review`.
+  - [x] `waiting_for_user` / `waiting_for_approval`, no PR, within `WAITING_GRACE` (30 min) → keep polling (stays `running`) + one-time "needs input" comment; past the window → `needs_review`.
   - [x] still working (`new`/`claimed`/`running`/`resuming`) and no PR → keep polling.
   - [x] `exit` + `blocked`/`not_reproducible` → `needs_review` (with blocker text).
   - [x] `exit` without a verifiable PR → `needs_review` (conservative).
@@ -101,12 +101,13 @@ Legend: `[x]` done · `[~]` partially done / needs live credentials · `[ ]` not
 
 - [x] `scripts/emit_sample_webhook.py` — sends a correctly signed `issues.labeled` (or `opened`) fixture; `--delivery` to replay, `--bad-signature` to force 401.
 - [x] `scripts/selftest.py` (21 checks, offline, no Devin/GitHub calls): bad signature → 401; wrong repo → 403; non-trigger action / non-`issues` event → 200 ignored; malformed/null payloads → 200 ignored (not 500); first delivery → 202; same delivery id → 200 `duplicate_delivery`; second delivery same issue → 200 `already_active`; exactly one job row; correlation tag `ops-guard:issue:10:attempt:1`; claim → `creating`; new delivery after terminal → 202 `attempt:2`; `/health`, `/metrics`, `/runs/{n}`, `/runs/999`→404.
-- [x] `scripts/e2e_test.py` (10 scenarios / 20 checks): worker create → `running`, then monitor:
+- [x] `scripts/e2e_test.py` (11 scenarios / 22 checks): worker create → `running`, then monitor:
   - happy path (PR GitHub-confirmed) → `remediated`;
   - `waiting_for_user` **with** a confirmed PR → `remediated`;
+  - `waiting_for_user`, no PR, within grace → stays `running`; past grace → `needs_review`;
   - `exit` claiming remediated but PR **not** confirmable by GitHub → `needs_review`;
   - PR wrong repo / wrong branch / no `#issue` reference → `needs_review`;
-  - `blocked` → `needs_review`; `error` / `suspended` (billing) → `failed`; `waiting_for_user` with no PR → `needs_review`.
+  - `blocked` → `needs_review`; `error` / `suspended` (billing) → `failed`.
 - [x] Docker: `docker build` succeeds; container boots, `/health` ok, signed webhook → 202, job persisted, `/runs` + `/runs/{n}` served (verified via `docker exec` — rootless podman here doesn't publish host ports; a normal Docker daemon does).
 
 ## Phase 9 — Live Integration

@@ -174,7 +174,8 @@ poll regardless of session `status`.
 | GitHub confirms a PR for the issue: URL/base repo == `TARGET_REPOSITORY`, targets the default branch, body references `#<issue>`, open or merged | `remediated` |
 | `status == error` or `status_detail == error` (and no such PR) | `failed` |
 | `status == suspended` or `status_detail` is a billing/usage-limit reason (and no such PR) | `failed` |
-| `status_detail` in {`waiting_for_user`, `waiting_for_approval`} (and no such PR) | `needs_review` |
+| `status_detail` in {`waiting_for_user`, `waiting_for_approval`}, no PR, within `WAITING_GRACE` (30 min) | keep polling (stays `running`), post a one-time "needs input" note |
+| `status_detail` in {`waiting_for_user`, `waiting_for_approval`}, no PR, past `WAITING_GRACE` | `needs_review` |
 | `status == exit` + output `blocked` or `not_reproducible` | `needs_review` |
 | `status == exit` without a verified PR | `needs_review` |
 

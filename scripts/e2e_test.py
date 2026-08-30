@@ -25,6 +25,7 @@ from app import db, states  # noqa: E402
 from app.config import get_config  # noqa: E402
 from app import devin as devin_mod, github as gh_mod  # noqa: E402
 from app.worker import _process  # noqa: E402
+from app import monitor as monitor_mod  # noqa: E402
 from app.monitor import _evaluate  # noqa: E402
 
 PASS = FAIL = 0
@@ -127,12 +128,24 @@ async def main() -> int:
         states.FAILED,
     )
 
+    # Paused on a human, no PR yet: stay `running` and keep polling within the
+    # grace window (a PR would flip it to remediated).
     await scenario(
         "waiting",
         {"status": "running", "status_detail": "waiting_for_user"},
         None,
+        states.RUNNING,
+    )
+
+    # Same, but past the grace window -> hand to a human.
+    monitor_mod.WAITING_GRACE = -1.0
+    await scenario(
+        "waiting-timeout",
+        {"status": "running", "status_detail": "waiting_for_user"},
+        None,
         states.NEEDS_REVIEW,
     )
+    monitor_mod.WAITING_GRACE = 1800.0
 
     # Session still paused for a human, but a valid PR is already up -> the PR
     # is the success bar, so the job is remediated.
