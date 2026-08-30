@@ -243,6 +243,49 @@ def claim_queued_job() -> Optional[dict[str, Any]]:
         )
 
 
+def add_event_once(job_id: int, kind: str, detail: str = "") -> bool:
+    """Insert a job_event of this kind only if the job has none already.
+    Returns True if it was inserted (caller should act once, e.g. comment)."""
+    with _writer() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM job_events WHERE job_id = ? AND kind = ? LIMIT 1",
+            (job_id, kind),
+        ).fetchone()
+        if exists is not None:
+            return False
+        _log_event(conn, job_id, kind, detail)
+        return True
+
+
+def has_event(job_id: int, kind: str) -> bool:
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT 1 FROM job_events WHERE job_id = ? AND kind = ? LIMIT 1",
+            (job_id, kind),
+        ).fetchone() is not None
+
+
+def first_seen_at(job_id: int, kind: str, detail: str = "") -> float:
+    """Timestamp of this job's first `kind` event, recording it if absent.
+
+    Gives callers a restart-safe clock for a condition (e.g. when a session
+    first paused on a human) rather than one anchored to the job's own start.
+    """
+    with _writer() as conn:
+        row = conn.execute(
+            "SELECT MIN(at) AS at FROM job_events WHERE job_id = ? AND kind = ?",
+            (job_id, kind),
+        ).fetchone()
+        if row is not None and row["at"] is not None:
+            return float(row["at"])
+        now = time.time()
+        conn.execute(
+            "INSERT INTO job_events (job_id, at, kind, detail) VALUES (?, ?, ?, ?)",
+            (job_id, now, kind, detail),
+        )
+        return now
+
+
 def reconciled_count() -> int:
     """How many jobs were recovered by correlation-tag reconciliation."""
     with _connect() as conn:

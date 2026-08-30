@@ -38,6 +38,30 @@ class GitHubClient:
         resp = await self._client.post(url, headers=self._headers, json={"body": body})
         resp.raise_for_status()
 
+    async def issue_has_comment(self, issue_number: int, marker: str) -> bool:
+        """True when an issue comment already contains `marker`.
+
+        Lets a caller retry a failed comment without risking a duplicate when
+        the request actually reached GitHub.
+        """
+        url = f"https://api.github.com/repos/{self._cfg.target_repository}/issues/{issue_number}/comments"
+        page = 1
+        while page <= 10:
+            resp = await self._client.get(
+                url, headers=self._headers, params={"per_page": 100, "page": page}
+            )
+            resp.raise_for_status()
+            items = resp.json()
+            if not isinstance(items, list) or not items:
+                return False
+            for comment in items:
+                if marker in (comment.get("body") or ""):
+                    return True
+            if len(items) < 100:
+                return False
+            page += 1
+        return False
+
     async def pr_status(self, pr_url: str) -> Optional[dict[str, Any]]:
         """Return {state, merged, url_repo, base_repo, body} for a PR URL, or None.
 

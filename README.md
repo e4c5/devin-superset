@@ -43,7 +43,7 @@ PR; it never merges — a human still reviews and merges.
 ```bash
 pip install -r requirements.txt
 python scripts/selftest.py     # 21 checks: webhook auth, dedup, malformed payloads, one-active-job, state machine, endpoints
-python scripts/e2e_test.py     # worker + monitor against mocked Devin/GitHub HTTP, 13 scenarios
+python scripts/e2e_test.py     # worker + monitor against mocked Devin/GitHub HTTP, 16 scenarios
 ```
 
 This exercises webhook verification → job reservation → session create → monitor
@@ -106,7 +106,9 @@ its body links back to the session, so a session cannot claim credit for an
 unrelated pre-existing PR; and is open or merged. This is checked on every poll,
 so a session still `running` or paused `waiting_for_user` is marked `remediated`
 as soon as its PR is up. A session that ends without such a PR routes to
-`needs_review` (or `failed` on error / billing). Guard never merges the PR.
+`needs_review` (or `failed` on error / billing); a session paused on a human is
+kept under observation for 30 min (it may still open a PR) before it goes to
+`needs_review`. Guard never merges the PR.
 
 ---
 
@@ -114,6 +116,11 @@ as soon as its PR is up. A session that ends without such a PR routes to
 
 ### 1. Prerequisites
 
+- Docker Engine with Docker Compose v2 (`docker compose`), plus Python 3 and
+  `pip` if you want to run the offline checks or dashboard locally.
+- A public HTTPS endpoint for GitHub to reach. The quick-start command uses
+  `npx`, so it requires a current Node.js installation. `ngrok` or a production
+  HTTPS reverse proxy work equally well.
 - A Devin **organization** and a **service-user credential** with permission to
   create sessions (`UseDevinSessions`) and view org sessions (`ViewOrgSessions`).
 - Your Superset fork **connected to Devin** (org-level Git connection) with
@@ -166,11 +173,58 @@ Add a webhook to the fork → **Settings ▸ Webhooks**:
 The tunnel host changes on restart; re-point the hook with
 `gh api repos/<owner>/<fork>/hooks/<id> -X PATCH -f "config[url]=https://<new-host>/webhook/github"`.
 
-### 4. Trigger a run
+### 4. Preflight the integration
+
+Verify the service before spending Devin budget:
+
+```bash
+curl -fsS http://localhost:8000/health
+python scripts/selftest.py
+GITHUB_WEBHOOK_SECRET=... TARGET_REPOSITORY=owner/fork \
+  python scripts/emit_sample_webhook.py --repo owner/fork --issue 42 --action labeled
+curl -fsS http://localhost:8000/runs/42
+```
+
+The health response should be `{"status":"ok"}`. The sample webhook should
+create a job (and therefore can create a real Devin session when real Devin
+credentials are configured); use an unlabelled disposable issue or run the
+offline tests instead if you do not want that. In GitHub's webhook settings,
+use **Recent Deliveries** to confirm the public URL returns a successful
+response. Also run the repository-listing `curl` in step 1 and confirm that
+`DEVIN_REPOSITORY_ID` is present before applying the trigger label.
+
+### 5. Trigger a run
 
 Open one of the authored issues in the fork, then add the `devin-autofix` label.
 Ops Guard comments **"Devin session started"** with the session URL within
 seconds; watch progress at `GET /runs/{issue_number}` or `python scripts/dashboard.py`.
+
+### Approvals and unattended runs
+
+`BYPASS_APPROVAL=false` is the production default. With that setting, Devin can
+pause a session with `waiting_for_user` or `waiting_for_approval`; the session
+URL in Ops Guard's issue comment is where an authorized Devin user reviews and
+answers the request. Ops Guard continues to poll for 30 minutes so it can still
+verify a PR created after the pause. If no verifiable PR appears by then, the
+run becomes `needs_review`; resolve the request in Devin or start a new,
+explicitly approved run from the issue.
+
+Set `BYPASS_APPROVAL=true` only for a controlled demo. It lets Devin proceed
+without those prompts and is not a substitute for restricting which issues may
+receive the trigger label.
+
+### Durable deployment
+
+The tunnel command is intended for a demo, not a durable endpoint. For a
+persistent installation, run the Compose service on a host with a stable public
+HTTPS URL and place it behind an HTTPS reverse proxy or managed ingress. Point
+the GitHub webhook at that stable `/webhook/github` URL.
+
+Keep `.env` out of version control and supply its secrets through your host or
+deployment platform's secret store. The Compose configuration persists SQLite
+under `./data`; retain that directory across redeployments and back it up
+regularly. After a restart, check `/health` and one GitHub webhook delivery
+before enabling the label on production issues.
 
 ---
 

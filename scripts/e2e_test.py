@@ -7,9 +7,12 @@ Proves: session create -> running -> monitor verifies completion, and that
 from __future__ import annotations
 
 import asyncio
+import itertools
+import json
 import os
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -25,9 +28,12 @@ from app import db, states  # noqa: E402
 from app.config import get_config  # noqa: E402
 from app import devin as devin_mod, github as gh_mod  # noqa: E402
 from app.worker import _process  # noqa: E402
+from app import monitor as monitor_mod  # noqa: E402
 from app.monitor import _evaluate  # noqa: E402
 
 PASS = FAIL = 0
+# Distinct issue per scenario: one active job is allowed per issue.
+_ISSUE_SEQ = itertools.count(1)
 
 
 def check(name, cond):
@@ -49,11 +55,22 @@ def devin_client(session_state, sid="sess-9"):
     return devin_mod.DevinClient(cfg, client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
 
-def gh_client(pr_state, issue_no=1, base_ref="main"):
+def gh_client(pr_state, issue_no=1, base_ref="main", comments=None, fail_comments=0):
+    """`comments` records posted comment bodies; the first `fail_comments`
+    POSTs are rejected so notification retries can be exercised."""
+    remaining = {"fail": fail_comments}
+
     def handler(req: httpx.Request) -> httpx.Response:
         parts = req.url.path.strip("/").split("/")
         if req.method == "POST" and req.url.path.endswith("/comments"):
+            if remaining["fail"] > 0:
+                remaining["fail"] -= 1
+                return httpx.Response(502, json={"message": "bad gateway"})
+            if comments is not None:
+                comments.append(json.loads(req.content.decode())["body"])
             return httpx.Response(201, json={"id": 1})
+        if req.method == "GET" and req.url.path.endswith("/comments"):
+            return httpx.Response(200, json=[{"body": b} for b in (comments or [])])
         if req.method == "GET" and "/pulls/" in req.url.path:
             if pr_state is None:
                 return httpx.Response(404, json={})
@@ -70,7 +87,7 @@ def gh_client(pr_state, issue_no=1, base_ref="main"):
 
 
 async def scenario(name, session_final, pr_state, expected_state, base_ref="main", body=None):
-    issue_no = hash(name) % 1000
+    issue_no = next(_ISSUE_SEQ)
     db.reserve_job(delivery_id=f"d-{name}", repository_id="acme/superset", event="issues",
                    action="labeled", issue_number=issue_no, issue_url="https://github.com/acme/superset/issues/1",
                    title="t", issue_body="do the thing")
@@ -89,6 +106,72 @@ async def scenario(name, session_final, pr_state, expected_state, base_ref="main
     j = db.get_job(job["id"])
     check(f"[{name}] final state == {expected_state} (got {j['state']})", j["state"] == expected_state)
     await dc.aclose()
+    await gc.aclose()
+
+
+async def _running_job(name, issue_no, comments=None):
+    db.reserve_job(delivery_id=f"d-{name}", repository_id="acme/superset", event="issues",
+                   action="labeled", issue_number=issue_no,
+                   issue_url="https://github.com/acme/superset/issues/1",
+                   title="t", issue_body="do the thing")
+    job = db.claim_queued_job()
+    cfg = get_config()
+    sid = f"sess-{name}"
+    dc = devin_client({"status": "running"}, sid=sid)
+    gc = gh_client(None, issue_no=issue_no, comments=comments)
+    await _process(cfg, dc, gc, job)
+    await dc.aclose()
+    await gc.aclose()
+    return cfg, db.get_job(job["id"])
+
+
+async def late_waiting_keeps_full_grace():
+    """A session that only pauses after running past WAITING_GRACE still gets
+    the full waiting window: the clock starts when waiting begins."""
+    name = "late-waiting"
+    issue_no = next(_ISSUE_SEQ)
+    cfg, job = await _running_job(name, issue_no)
+    gc = gh_client(None, issue_no=issue_no)
+    old = time.time() - (monitor_mod.WAITING_GRACE * 3)
+    with db._writer() as conn:  # job started long before it ever paused
+        conn.execute("UPDATE jobs SET created_at = ?, started_at = ? WHERE id = ?",
+                     (old, old, job["id"]))
+    job = db.get_job(job["id"])
+    waiting = {"status": "running", "status_detail": "waiting_for_user"}
+
+    await _evaluate(cfg, gc, job, waiting)
+    check(f"[{name}] long-running session keeps polling when it first waits",
+          db.get_job(job["id"])["state"] == states.RUNNING)
+
+    with db._writer() as conn:  # now the waiting itself is past the window
+        conn.execute("UPDATE job_events SET at = ? WHERE job_id = ? AND kind = 'waiting'",
+                     (time.time() - monitor_mod.WAITING_GRACE - 1, job["id"]))
+    await _evaluate(cfg, gc, db.get_job(job["id"]), waiting)
+    check(f"[{name}] needs_review once the waiting itself exceeds the grace window",
+          db.get_job(job["id"])["state"] == states.NEEDS_REVIEW)
+    await gc.aclose()
+
+
+async def waiting_notice_retries_after_failure():
+    """A failed 'needs input' comment is retried on the next poll, exactly once."""
+    name = "waiting-notice-retry"
+    comments: list[str] = []
+    issue_no = next(_ISSUE_SEQ)
+    cfg, job = await _running_job(name, issue_no)
+    # The first notice attempt fails; later polls reuse a healthy client.
+    gc = gh_client(None, issue_no=issue_no, comments=comments, fail_comments=1)
+    waiting = {"status": "running", "status_detail": "waiting_for_user"}
+
+    await _evaluate(cfg, gc, job, waiting)
+    check(f"[{name}] failed notice is not marked delivered",
+          not comments and not db.has_event(job["id"], "waiting_notice"))
+
+    await _evaluate(cfg, gc, db.get_job(job["id"]), waiting)
+    check(f"[{name}] notice posted on the next poll",
+          len(comments) == 1 and "may need input" in comments[0])
+
+    await _evaluate(cfg, gc, db.get_job(job["id"]), waiting)
+    check(f"[{name}] notice not duplicated afterwards", len(comments) == 1)
     await gc.aclose()
 
 
@@ -130,12 +213,27 @@ async def main() -> int:
         states.FAILED,
     )
 
+    # Paused on a human, no PR yet: stay `running` and keep polling within the
+    # grace window (a PR would flip it to remediated).
     await scenario(
         "waiting",
         {"status": "running", "status_detail": "waiting_for_user"},
         None,
+        states.RUNNING,
+    )
+
+    # Same, but past the grace window -> hand to a human.
+    monitor_mod.WAITING_GRACE = -1.0
+    await scenario(
+        "waiting-timeout",
+        {"status": "running", "status_detail": "waiting_for_user"},
+        None,
         states.NEEDS_REVIEW,
     )
+    monitor_mod.WAITING_GRACE = 1800.0
+
+    await late_waiting_keeps_full_grace()
+    await waiting_notice_retries_after_failure()
 
     # Session still paused for a human, but a valid PR is already up -> the PR
     # is the success bar, so the job is remediated.
